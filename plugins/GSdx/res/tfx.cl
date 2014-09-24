@@ -26,6 +26,13 @@
 	#error "MAX_PRIM_PER_BATCH != 32u OR 64u"
 #endif
 
+#define TFX_ABA(sel) ((sel.x >> 24) & 3)
+#define TFX_ABB(sel) ((sel.x >> 26) & 3)
+#define TFX_ABC(sel) ((sel.x >> 28) & 3)
+#define TFX_ABD(sel) ((sel.x >> 30) & 3)
+#define TFX_WMS(sel) ((sel.y >>  8) & 3)
+#define TFX_WMT(sel) ((sel.y >> 10) & 3)
+
 typedef struct
 {
 	union {float4 p; struct {float x, y; uint z, f;};};
@@ -35,9 +42,9 @@ typedef struct
 typedef struct
 {
 	gs_vertex v[3];
-	uint zmin;
+	uint zmin, zmax;
 	uint pb_index;
-	uint _pad[2];
+	uint _pad;
 } gs_prim;
 
 typedef struct
@@ -60,6 +67,7 @@ typedef struct
 {
 	int4 scissor;
 	char dimx[4][4];
+	uint2 sel;
 	int fbp, zbp, bw;
 	uint fm, zm;
 	uchar4 fog; // rgb
@@ -110,10 +118,10 @@ enum GS_TFX
 
 enum GS_CLAMP
 {
-	CLAMP_REPEAT		= 0,
-	CLAMP_CLAMP			= 1,
-	CLAMP_REGION_CLAMP	= 2,
-	CLAMP_REGION_REPEAT	= 3,
+	CLAMP_REGION_REPEAT	= 0,
+	CLAMP_REPEAT		= 1,
+	CLAMP_CLAMP			= 2,
+	CLAMP_REGION_CLAMP	= 3,
 };
 
 enum GS_ZTST
@@ -603,6 +611,7 @@ __kernel void KERNEL_PRIM(
 		// only interpolate the relative to zmin and hopefully small values
 
 		uint zmin = min(min(v0->z, v1->z), v2->z);
+		uint zmax = max(max(v0->z, v1->z), v2->z);
 		
 		prim->v[0].p = (float4)(v0->p.x, v0->p.y, as_float(v0->z - zmin), v0->p.w);
 		prim->v[0].tc = v0->tc;
@@ -612,6 +621,7 @@ __kernel void KERNEL_PRIM(
 		prim->v[2].tc = v2->tc;
 
 		prim->zmin = zmin;
+		prim->zmax = zmax;
 
 		float4 dp0 = v1->p - v0->p;
 		float4 dp1 = v0->p - v2->p;
@@ -969,27 +979,34 @@ bool DestAlphaTest(uint fd)
 
 int Wrap(int a, int b, int c, int mode)
 {
-	switch(mode)
+	if(MERGED)
 	{
-	case CLAMP_REPEAT:
-		return a & b;
-	case CLAMP_CLAMP:
-		return clamp(a, 0, c);
-	case CLAMP_REGION_CLAMP:
-		return clamp(a, b, c);
-	case CLAMP_REGION_REPEAT:
-		return (a & b) | c;
+		return select((a & b) | c, clamp(a, b, c), (mode & 2) != 0);
+	}
+	else
+	{
+		switch(mode)
+		{
+		case CLAMP_REGION_REPEAT:
+			return (a & b) | c;
+		case CLAMP_REPEAT:
+			return a & b;
+		case CLAMP_CLAMP:
+			return clamp(a, 0, c);
+		case CLAMP_REGION_CLAMP:
+			return clamp(a, b, c);
+		}
 	}
 }
 
-int4 AlphaBlend(int4 c, int afix, uint fd)
+int4 AlphaBlend(int4 c, uint fd, int afix, uint2 sel)
 {
 	if(FWRITE && (ABE || AA1))
 	{
 		int4 cs = c;
 		int4 cd;
 
-		if(ABA != ABB && (ABA == 1 || ABB == 1 || ABC == 1) || ABD == 1)
+		if(ABA != ABB && (ABA == 1 || ABB == 1 || ABC == 1) || ABD == 1 || MERGED)
 		{
 			if(is32bit(FPSM) || is24bit(FPSM))
 			{
@@ -1007,50 +1024,69 @@ int4 AlphaBlend(int4 c, int afix, uint fd)
 			}
 		}
 
-		if(ABA != ABB)
+		if(MERGED)
 		{
-			switch(ABA)
-			{
-			case 0: break; // c.xyz = cs.xyz;
-			case 1: c.xyz = cd.xyz; break;
-			case 2: c.xyz = 0; break;
-			}
+			int aba = TFX_ABA(sel);
+			int abb = TFX_ABB(sel);
+			int abc = TFX_ABC(sel);
+			int abd = TFX_ABD(sel);
 
-			switch(ABB)
-			{
-			case 0: c.xyz -= cs.xyz; break;
-			case 1: c.xyz -= cd.xyz; break;
-			case 2: break;
-			}
+			int ad = !is24bit(FPSM) ? cd.w : 0x80;
 
-			if(!(is24bit(FPSM) && ABC == 1))
-			{
-				int a = 0;
+			int3 A = aba == 0 ? cs.xyz : aba == 1 ? cd.xyz : 0;
+			int3 B = abb == 0 ? cs.xyz : abb == 1 ? cd.xyz : 0;
+			int C = abc == 0 ? cs.w : abc == 1 ? ad : afix;
+			int3 D = abd == 0 ? cs.xyz : abd == 1 ? cd.xyz : 0;
 
-				switch(ABC)
-				{
-				case 0: a = cs.w; break;
-				case 1: a = cd.w; break;
-				case 2: a = afix; break;
-				}
-
-				c.xyz = c.xyz * a >> 7;
-			}
-
-			switch(ABD)
-			{
-			case 0: c.xyz += cs.xyz; break;
-			case 1: c.xyz += cd.xyz; break;
-			case 2: break;
-			}
+			c.xyz = (mul24(A - B, C) >> 7) + D;
 		}
 		else
 		{
-			switch(ABD)
+			if(ABA != ABB)
 			{
-			case 0: break;
-			case 1: c.xyz = cd.xyz; break;
-			case 2: c.xyz = 0; break;
+				switch(ABA)
+				{
+				case 0: break; // c.xyz = cs.xyz;
+				case 1: c.xyz = cd.xyz; break;
+				case 2: c.xyz = 0; break;
+				}
+
+				switch(ABB)
+				{
+				case 0: c.xyz -= cs.xyz; break;
+				case 1: c.xyz -= cd.xyz; break;
+				case 2: break;
+				}
+
+				if(!(is24bit(FPSM) && ABC == 1))
+				{
+					int a = 0;
+
+					switch(ABC)
+					{
+					case 0: a = cs.w; break;
+					case 1: a = cd.w; break;
+					case 2: a = afix; break;
+					}
+
+					c.xyz = c.xyz * a >> 7;
+				}
+
+				switch(ABD)
+				{
+				case 0: c.xyz += cs.xyz; break;
+				case 1: c.xyz += cd.xyz; break;
+				case 2: break;
+				}
+			}
+			else
+			{
+				switch(ABD)
+				{
+				case 0: break;
+				case 1: c.xyz = cd.xyz; break;
+				case 2: c.xyz = 0; break;
+				}
 			}
 		}
 
@@ -1172,10 +1208,10 @@ int4 SampleTexture(__global uchar* tex, __global gs_param* pb, float3 t)
 		int2 uv0 = uv >> 4;
 		int2 uv1 = uv0 + 1;
 
-		uv0.x = Wrap(uv0.x, pb->minu, pb->maxu, WMS);
-		uv0.y = Wrap(uv0.y, pb->minv, pb->maxv, WMT);
-		uv1.x = Wrap(uv1.x, pb->minu, pb->maxu, WMS);
-		uv1.y = Wrap(uv1.y, pb->minv, pb->maxv, WMT);
+		uv0.x = Wrap(uv0.x, pb->minu, pb->maxu, MERGED ? TFX_WMS(pb->sel) : WMS);
+		uv0.y = Wrap(uv0.y, pb->minv, pb->maxv, MERGED ? TFX_WMT(pb->sel) : WMT);
+		uv1.x = Wrap(uv1.x, pb->minu, pb->maxu, MERGED ? TFX_WMS(pb->sel) : WMS);
+		uv1.y = Wrap(uv1.y, pb->minv, pb->maxv, MERGED ? TFX_WMT(pb->sel) : WMT);
 
 		int4 c00 = ReadTexel(tex, uv0.x, uv0.y, 0, pb);
 		int4 c01 = ReadTexel(tex, uv1.x, uv0.y, 0, pb);
@@ -1356,6 +1392,11 @@ __kernel __attribute__((reqd_work_group_size(8, 8, 1))) void KERNEL_TFX(
 			{
 				// TODO: aa1: draw edge as a line
 
+				if(!ZTest(prim->zmax, zd))
+				{
+					continue;
+				}
+
 				__global gs_barycentric* b = &barycentric[prim_index + i];
 
 				float3 f = b->dx.xyz * (pf.x - b->dx.w) + b->dy.xyz * (pf.y - b->dy.w) + (float3)(0, 0, 1);
@@ -1420,8 +1461,6 @@ __kernel __attribute__((reqd_work_group_size(8, 8, 1))) void KERNEL_TFX(
 
 			if(TFX != TFX_NONE)
 			{
-				tex = vm; // TODO: use the texture cache
-
 				ct = SampleTexture(tex, pb, t);
 			}
 
@@ -1515,7 +1554,7 @@ __kernel __attribute__((reqd_work_group_size(8, 8, 1))) void KERNEL_TFX(
 
 			// alpha blend
 
-			c = AlphaBlend(c, pb->afix, fd);
+			c = AlphaBlend(c, fd, pb->afix, pb->sel);
 
 			// write frame
 
