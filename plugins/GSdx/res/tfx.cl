@@ -1,3 +1,9 @@
+#if defined(CL_VERSION_2_0)
+
+#error hello
+
+#endif
+
 #if defined(CL_VERSION_1_1) || defined(CL_VERSION_1_2) // make safe to include in resource file to enforce dependency
 
 #ifdef cl_amd_printf
@@ -1186,8 +1192,6 @@ int4 SampleTexture(__global uchar* tex, __global gs_param* pb, float3 t)
 		if(!FST)
 		{
 			uv = convert_int2_rte(t.xy * native_recip(t.z));
-
-			if(LTF) uv -= 0x0008;
 		}
 		else
 		{
@@ -1202,6 +1206,8 @@ int4 SampleTexture(__global uchar* tex, __global gs_param* pb, float3 t)
 
 			uv = convert_int2(t.xy); 
 		}
+
+		if(LTF) uv -= 0x0008;
 
 		int2 uvf = uv & 0x000f;
 

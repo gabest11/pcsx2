@@ -589,13 +589,15 @@ void GSRendererCL::InvalidateVideoMem(const GIFRegBITBLTBUF& BITBLTBUF, const GS
 
 	if(!m_synced)
 	{
+		int i = 0;
+
 		bool wait;
 
 		do
 		{
 			wait = false;
 
-			for(int i = 0; i < 4; i++)
+			for(; i < 4; i++)
 			{
 				GSVector4i pages = m_rw_pages[0][i] | m_rw_pages[1][i];
 
@@ -623,12 +625,14 @@ void GSRendererCL::InvalidateVideoMem(const GIFRegBITBLTBUF& BITBLTBUF, const GS
 		if(!m_synced)
 		{
 			o->GetPages(r, m_tmp_pages2); // TODO: don't ask twice
+			
+			const uint32* p = m_tmp_pages2;
 
 			do
 			{
 				wait = false;
 
-				for(const uint32* p = m_tmp_pages2; *p != GSOffset::EOP; p++)
+				for(; *p != GSOffset::EOP; p++)
 				{
 					if(m_rw_pages_rendering[*p])
 					{
@@ -1628,24 +1632,6 @@ bool GSRendererCL::SetupParameter(TFXJob* job, TFXParameter* pb, GSVertexCL* ver
 							v[i + 0].t = (t0 * w).xyzw(t0);
 							v[i + 1].t = (t1 * w).xyzw(t1);
 						}
-					}
-				}
-
-				if(sel.ltf && sel.fst) // TODO: quite slow, do this in the prim kernel?
-				{
-					// if q is constant we can do the half pel shift for bilinear sampling on the vertices
-
-					// TODO: but not when mipmapping is used!!!
-
-					GSVector4 half(8.0f, 8.0f);
-
-					GSVertexCL* RESTRICT v = vertex;
-
-					for(int i = 0, j = vertex_count; i < j; i++)
-					{
-						GSVector4 t = v[i].t;
-
-						v[i].t = (t - half).xyzw(t);
 					}
 				}
 			}
